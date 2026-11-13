@@ -1,0 +1,68 @@
+# Tiered evaluation pipeline for the Aurora assistant.
+#   1. harness tests   : every push/PR, no API key, seconds
+#   2. quality gates   : PRs that touch the app, data or gates, plus nightly on main (needs OPENAI_API_KEY secret)
+# Add the key in GitHub: Settings → Secrets and variables → Actions → New repository secret → OPENAI_API_KEY
+name: evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"   # nightly drift check, 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  harness-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -m "not live" -q
+
+  quality-gates:
+    needs: harness-tests
+    # Skip on forks (no secret) and on PRs that don't touch the system under test.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      RAGAS_DO_NOT_TRACK: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            app:
+              - 'src/**'
+              - 'data/**'
+              - 'config/**'
+      - uses: actions/setup-python@v5
+        if: github.event_name != 'pull_request' || steps.changes.outputs.app == 'true'
+        with: { python-version: "3.12", cache: pip }
+      - name: Install
+        if: github.event_name != 'pull_request' || steps.changes.outputs.app == 'true'
+        run: pip install -r requirements.txt
+      - name: Restore judge cache   # makes re-runs on unchanged answers nearly free
+        if: github.event_name != 'pull_request' || steps.changes.outputs.app == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: judge-cache-${{ github.sha }}
+          restore-keys: judge-cache-
+      - name: RAG quality gates (production config)
+        if: github.event_name != 'pull_request' || steps.changes.outputs.app == 'true'
+        run: python scripts/run_eval.py rag --config baseline
+      - name: Agent quality gates
+        if: github.event_name != 'pull_request' || steps.changes.outputs.app == 'true'
+        run: python scripts/run_eval.py agent --prompt v2
+      - name: Upload per-sample scores as evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: results/
+          if-no-files-found: ignore

@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.egg-info/
+.cache/
+.pytest_cache/
+.ipynb_checkpoints/
+results/*
+!results/.gitkeep
+!results/reference/
+.DS_Store
+data/golden/synthetic_candidates.jsonl
